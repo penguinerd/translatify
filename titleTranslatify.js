@@ -29,12 +29,13 @@
         "he": "Hebrew",
         "el": "Greek",
         "tl": "Filipino"
+        // add more based on google translate
     };
 
     // Settings 
     const STORAGE_KEY = "translator:settings";
     const defaults = {
-        mode: "auto",
+        mode: "manual",
         display: "both",
         target: "en"
     };
@@ -59,42 +60,120 @@
 
     const settings = loadSettings();
 
-    // Translation 
-    const cache = new Map(); // `${target}|${original}` -> translated string, or null if no translation needed
+    // Translation
+    const CACHE_KEY = "translator:cache:v1";
+    const MAX_CACHE = 2000;
+    const NETWORK_DELAY = 600; // ms to wait before calling the API (lets you skip tracks freely)
+    const MIN_GAP = 400;       // min ms between requests
 
-    const cacheKey = (text, target = settings.target) => `${target}|${text}`;
+    function loadCache() {
+        try { return JSON.parse(localStorage.getItem(CACHE_KEY) || "[]"); }
+        catch { return []; }
+    }
+
+    const cache = new Map(loadCache());
+    let saveTimer;
+
+    function saveCacheSoon() {
+        clearTimeout(saveTimer);
+        saveTimer = setTimeout(() => {
+            try { localStorage.setItem(CACHE_KEY, JSON.stringify([...cache])); } catch { }
+        }, 2000);
+    }
+
+    function cacheSet(key, value) {
+        cache.delete(key);
+        cache.set(key, value);
+        while (cache.size > MAX_CACHE) cache.delete(cache.keys().next().value); // drop oldest
+        saveCacheSoon();
+    }
+
+    const cacheKey = (text, target = settings.target) => `${target}|${text.trim()}`;
+    const inflight = new Map();
+    let blockedUntil = 0;
+    let failCount = 0;
+
+    // Serialises requests and enforces a minimum gap between them
+    let lastRequestAt = 0;
+    let queue = Promise.resolve();
+    function throttled(fn) {
+        const run = queue.then(async () => {
+            const wait = lastRequestAt + MIN_GAP - Date.now();
+            if (wait > 0) await new Promise(r => setTimeout(r, wait));
+            lastRequestAt = Date.now();
+            return fn();
+        });
+        queue = run.catch(() => { });
+        return run;
+    }
+
+    async function gtxTitle(text, sl, tl) {
+        const url =
+            "https://translate.googleapis.com/translate_a/single" +
+            `?client=gtx&sl=${encodeURIComponent(sl)}&tl=${encodeURIComponent(tl)}&dt=t&q=${encodeURIComponent(text)}`;
+        const res = await throttled(() => fetch(url));
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        return {
+            translated: data[0].map(part => part[0]).join(""),
+            detected: String(data[2] || "")
+        };
+    }
 
     async function translateText(text) {
         const target = settings.target;
         const key = cacheKey(text, target);
+
         if (cache.has(key)) return cache.get(key);
+        if (inflight.has(key)) return inflight.get(key);
+        if (Date.now() < blockedUntil) return null;
 
-        try {
-            const url =
-                "https://translate.googleapis.com/translate_a/single" +
-                `?client=gtx&sl=auto&tl=${encodeURIComponent(target)}&dt=t&q=${encodeURIComponent(text)}`;
-            const res = await fetch(url);
-            const data = await res.json();
-
-            const translated = data[0].map(part => part[0]).join("");
-            const detected = String(data[2] || "").toLowerCase();
-            const targetLower = target.toLowerCase();
-
-            const sameLang =
-                detected === targetLower ||
-                (!targetLower.includes("-") && detected.split("-")[0] === targetLower);
-
-            const result =
-                sameLang || translated.trim().toLowerCase() === text.trim().toLowerCase()
-                    ? null
-                    : translated;
-
-            cache.set(key, result);
-            return result;
-        } catch (err) {
-            console.error("Translation error:", err);
+        // Nothing to translate (numbers, punctuation, emoji)
+        if (!/\p{L}/u.test(text)) {
+            cacheSet(key, null);
             return null;
         }
+
+        const request = (async () => {
+            try {
+                let { translated, detected } = await gtxTitle(text, "auto", target);
+                const d = detected.toLowerCase();
+                const t = target.toLowerCase();
+
+                let result;
+                if (t.startsWith("zh") && d.startsWith("zh")) {
+                    if (translated.trim() !== text.trim()) {
+                        result = translated; // script was already converted, no 2nd call needed
+                    } else {
+                        const from = t === "zh-cn" ? "zh-TW" : "zh-CN";
+                        ({ translated } = await gtxTitle(text, from, target));
+                        result = translated;
+                    }
+                } else if (d === t || (!t.includes("-") && d.split("-")[0] === t)) {
+                    result = null;
+                } else {
+                    result = translated;
+                }
+
+                if (result && result.trim().toLowerCase() === text.trim().toLowerCase()) result = null;
+
+                failCount = 0;
+                cacheSet(key, result);
+                return result;
+            } catch (err) {
+                failCount++;
+                const wait = Math.min(30000 * 2 ** (failCount - 1), 15 * 60 * 1000);
+                blockedUntil = Date.now() + wait;
+                console.error("Translation error:", err);
+                Spicetify.showNotification(`Translation failed, pausing for ${Math.round(wait / 1000)}s`, true);
+                return null;
+            } finally {
+                inflight.delete(key);
+            }
+        })();
+
+        inflight.set(key, request);
+        return request;
     }
 
     // DOM
@@ -136,6 +215,12 @@
         if (!el || el.textContent.trim() !== title.trim()) return;
 
         const target = settings.target;
+
+        if (!cache.has(cacheKey(title, target))) {
+            await new Promise(r => setTimeout(r, NETWORK_DELAY));
+            if (Spicetify.Player.data?.item?.uri !== uri) return;
+        }
+
         const translated = await translateText(title);
         if (!translated) return;
 

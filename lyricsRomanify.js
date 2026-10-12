@@ -1,4 +1,4 @@
-(async function () {
+(async function() {
     while (!window.Spicetify || !Spicetify.Player || !Spicetify.Player.data || !Spicetify.Menu) {
         await new Promise(r => setTimeout(r, 100));
     }
@@ -6,7 +6,7 @@
     // Settings
     const STORAGE_KEY = "lyricsConverter:settings";
     const defaults = {
-        romanize: "below"
+        romanize: "off"
     };
 
     function loadSettings() {
@@ -39,18 +39,59 @@
     const clean = t => t.replace(/\s*\n\s*/g, " ").trim();
 
     // Romanization
+    const CACHE_KEY = "lyricsConverter:cache:v1";
+    const MAX_CACHE = 5000;
+    const FETCH_DELAY = 800; // ms to wait before calling the API (lets you skip tracks freely)
+    const MIN_GAP = 500;     // min ms between requests
+
+    function loadCache() {
+        try { return JSON.parse(localStorage.getItem(CACHE_KEY) || "[]"); }
+        catch { return []; }
+    }
+
+    const cache = new Map(loadCache());
+    let saveTimer;
+
+    function saveCacheSoon() {
+        clearTimeout(saveTimer);
+        saveTimer = setTimeout(() => {
+            try { localStorage.setItem(CACHE_KEY, JSON.stringify([...cache])); } catch { }
+        }, 2000);
+    }
+
+    function cacheSet(key, value) {
+        cache.delete(key);
+        cache.set(key, value);
+        while (cache.size > MAX_CACHE) cache.delete(cache.keys().next().value); // drop oldest
+        saveCacheSoon();
+    }
+
+    // Serialises requests and enforces a minimum gap between them
+    let lastRequestAt = 0;
+    let queue = Promise.resolve();
+    function throttled(fn) {
+        const run = queue.then(async () => {
+            const wait = lastRequestAt + MIN_GAP - Date.now();
+            if (wait > 0) await new Promise(r => setTimeout(r, wait));
+            lastRequestAt = Date.now();
+            return fn();
+        });
+        queue = run.catch(() => { });
+        return run;
+    }
+
     async function gtx(q, sl) {
         const url =
             "https://translate.googleapis.com/translate_a/single" +
             `?client=gtx&sl=${encodeURIComponent(sl)}&tl=${encodeURIComponent(sl === "auto" ? "en" : sl)}&dt=t&dt=rm`;
 
-        const res = await fetch(url, {
+        const res = await throttled(() => fetch(url, {
             method: "POST",
             headers: {
                 "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"
             },
             body: "q=" + encodeURIComponent(q)
-        });
+        }));
 
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
@@ -67,41 +108,37 @@
 
     async function convertChunk(lines, sl) {
         const data = await gtx(lines.map(clean).join("\n"), sl);
-        const rom = data.rom ? data.rom.split("\n") : null;
 
-        if (rom && rom.length === lines.length) {
+        // No romanization offered for this text: retrying per line won't help
+        if (!data.rom) {
+            return { lang: data.lang, results: lines.map(() => ({ rom: null })) };
+        }
+
+        const rom = data.rom.split("\n");
+
+        if (rom.length === lines.length) {
             return {
                 lang: data.lang,
-                results: lines.map((_, i) => ({
-                    rom: rom[i].trim() || null
-                }))
+                results: lines.map((_, i) => ({ rom: rom[i].trim() || null }))
             };
         }
 
-        console.warn("Lyrics Converter: batch misaligned, falling back to per-line requests");
-
-        const results = new Array(lines.length);
-
-        for (let i = 0; i < lines.length; i += 4) {
-            await Promise.all(
-                lines.slice(i, i + 4).map(async (t, k) => {
-                    const d = await gtx(clean(t), data.lang || sl);
-                    results[i + k] = {
-                        rom: d.rom ? d.rom.trim() : null
-                    };
-                })
-            );
+        if (lines.length === 1) {
+            return { lang: data.lang, results: [{ rom: data.rom.trim() || null }] };
         }
 
-        return {
-            lang: data.lang,
-            results
-        };
+        // Misaligned: split in halves instead of going line by line
+        console.warn("Lyrics Converter: batch misaligned, splitting");
+        const mid = Math.ceil(lines.length / 2);
+        const lang = data.lang || sl;
+        const a = await convertChunk(lines.slice(0, mid), lang);
+        const b = await convertChunk(lines.slice(mid), lang);
+        return { lang: data.lang, results: [...a.results, ...b.results] };
     }
 
-    const cache = new Map();
     const pending = new Set();
     let cooldownUntil = 0;
+    let failCount = 0;
 
     async function fetchMissing(texts) {
         texts.forEach(t => pending.add(t));
@@ -115,16 +152,19 @@
 
                 if (lang && sl === "auto") sl = lang;
 
-                chunk.forEach((t, j) => cache.set(t, results[j]));
+                chunk.forEach((t, j) => cacheSet(t, results[j]));
             }
+
+            failCount = 0;
         } catch (err) {
-            console.error("Lyrics Converter error:", err);
-            cooldownUntil = Date.now() + 30000;
+            failCount++;
+            const wait = Math.min(30000 * 2 ** (failCount - 1), 15 * 60 * 1000);
+            cooldownUntil = Date.now() + wait;
+            console.error(`Lyrics Converter error, pausing for ${Math.round(wait / 1000)}s:`, err);
         } finally {
             texts.forEach(t => pending.delete(t));
         }
     }
-
     // DOM
     const LINE_SELECTORS = [
         '[data-testid="fullscreen-lyric"]',
@@ -156,7 +196,40 @@
 
     // Element -> { original, output, styled }
     const records = new Map();
+    let fetchTimer = null;
+    let fetching = false;
 
+    function scheduleFetch() {
+        if (fetchTimer || fetching) return;
+        fetchTimer = setTimeout(runFetch, FETCH_DELAY);
+    }
+
+    async function runFetch() {
+        fetchTimer = null;
+        if (settings.romanize === "off") return;
+
+        // Still backing off after a failure: try again once it ends
+        if (Date.now() < cooldownUntil) {
+            fetchTimer = setTimeout(runFetch, cooldownUntil - Date.now() + 100);
+            return;
+        }
+
+        // Only fetch lines that are still on screen
+        const missing = new Set();
+        for (const [el, rec] of records) {
+            const t = rec.original;
+            if (el.isConnected && needsConversion(t) && !cache.has(t) && !pending.has(t)) {
+                missing.add(t);
+            }
+        }
+        if (!missing.size) return;
+
+        fetching = true;
+        try { await fetchMissing([...missing]); }
+        finally { fetching = false; }
+
+        scan();
+    }
     function renderFor(text) {
         const entry = cache.get(text);
         if (!entry || !entry.rom) return null;
@@ -191,13 +264,12 @@
         }
 
         const enabled = settings.romanize !== "off";
-        const missing = new Set();
+        let needFetch = false;
 
         for (const el of getLineElements()) {
             const text = el.textContent;
             const existing = records.get(el);
 
-            // Still showing what we wrote: nothing to do.
             if (existing && existing.output !== null && text === existing.output) continue;
             if (!text.trim()) continue;
 
@@ -212,7 +284,7 @@
             if (!enabled) continue;
 
             if (needsConversion(text) && !cache.has(text) && !pending.has(text)) {
-                missing.add(text);
+                needFetch = true;
             }
 
             const out = renderFor(text);
@@ -228,9 +300,7 @@
             }
         }
 
-        if (missing.size && Date.now() >= cooldownUntil) {
-            fetchMissing([...missing]).then(() => scan());
-        }
+        if (needFetch) scheduleFetch();
     }
 
     function refresh() {
