@@ -3,8 +3,8 @@ Language support for Spotify(spicetify) via Google Translate
 
 ## features / showcase
 1. Title translation 
-![image 1](./showcase/2026-10-11-171922_hyprshot.png)
 
+![image 1](./showcase/2026-10-11-171922_hyprshot.png)
 ---
 2. Lyric romanization
 ![image 2](./showcase/2026-10-11-172125_hyprshot.png)
@@ -12,7 +12,7 @@ Language support for Spotify(spicetify) via Google Translate
 ## installation
 1. download the .js file
 ```bash
-    git clone https://github.com/penguinerd/translatify.git
+git clone https://github.com/penguinerd/translatify.git
 ```
 
 2. move the file into your spicetify extensions folder
@@ -21,8 +21,9 @@ Language support for Spotify(spicetify) via Google Translate
 
 3. enable, apply config
 ```bash
-    spicetify config extensions (filename)
-    spicetify apply
+spicetify config extensions titleTranslatify.js
+spicetify config extensions lyricsRomanify.js
+spicetify apply
 ```
 
 ## usage:
@@ -45,7 +46,8 @@ Language support for Spotify(spicetify) via Google Translate
 ## uninstall:
 1. remove the extension
 ```bash
-    spicetify config extensions(filename)-
+    spicetify config extensions titleTranslatify.js-
+    spicetify config extensions lyricsRomanify.js-
     spicetify apply
 ```
 2. delete the file from the folder
