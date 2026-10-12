@@ -46,9 +46,9 @@ spicetify apply
 ## uninstall:
 1. remove the extension
 ```bash
-    spicetify config extensions titleTranslatify.js-
-    spicetify config extensions lyricsRomanify.js-
-    spicetify apply
+spicetify config extensions titleTranslatify.js-
+spicetify config extensions lyricsRomanify.js-
+spicetify apply
 ```
 2. delete the file from the folder
 
