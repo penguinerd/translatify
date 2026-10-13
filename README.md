@@ -4,10 +4,12 @@ Language support for Spotify(spicetify) via Google Translate
 ## features / showcase
 1. Title translation 
 
-![image 1](./showcase/2026-10-11-171922_hyprshot.png)
+![untranslated title](./showcase/2026-10-13-011859_hyprshot.png)
+![translated title only](./showcase/2026-10-13-011920_hyprshot.png)
+![translated title with untranslated title in parenthesis](./showcase/2026-10-11-171922_hyprshot.png)
 ---
 2. Lyric romanization
-![image 2](./showcase/2026-10-11-172125_hyprshot.png)
+![romanized lyrics below original](./showcase/2026-10-11-172125_hyprshot.png)
 
 ## installation
 1. download the .js file
