@@ -3,7 +3,6 @@ Language support for Spotify(spicetify) via Google Translate
 
 ## features / showcase
 1. Title translation 
-
 ![untranslated title](./showcase/2026-10-13-011859_hyprshot.png)
 ![translated title only](./showcase/2026-10-13-011920_hyprshot.png)
 ![translated title with untranslated title in parenthesis](./showcase/2026-10-11-171922_hyprshot.png)
